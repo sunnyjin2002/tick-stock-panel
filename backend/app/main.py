@@ -17,6 +17,7 @@ from app.api import (
     alerts,
     analysis,
     backtest,
+    chip,
     data,
     ext_data,
     financials,
@@ -454,6 +455,7 @@ app.include_router(kline.router)
 app.include_router(watchlist.router)
 app.include_router(screener.router)
 app.include_router(backtest.router)
+app.include_router(chip.router)
 app.include_router(mining.router)
 app.include_router(intraday.router)
 app.include_router(indices.router)

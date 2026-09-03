@@ -59,6 +59,19 @@ _CHIP_SCHEMA: dict[str, pl.DataType] = {
     "avg_cost": pl.Float64,
 }
 
+# 筛选/列表查询用到的因子列（不含分布数组，减小批量响应体积）
+CHIP_FACTOR_COLS = [
+    "symbol",
+    "date",
+    "profit_ratio",
+    "concentration_90",
+    "avg_cost_deviation",
+    "single_peak_ratio",
+    "single_peak_width",
+    "is_low_position",
+    "avg_cost",
+]
+
 
 def _empty_chip_table() -> pl.DataFrame:
     return pl.DataFrame({name: pl.Series([], dtype=dtype) for name, dtype in _CHIP_SCHEMA.items()})
@@ -367,3 +380,29 @@ def compute_chip_table_incremental(
     if merged.is_empty():
         return 0
     return _write_chip_table(merged, d)
+
+
+# --------------------------------------------------------------------------- #
+# 查询
+# --------------------------------------------------------------------------- #
+
+
+def load_chip_table(data_dir: Path | None = None) -> pl.DataFrame:
+    """读取已落盘的筹码表；不存在或损坏时返回空表（schema 一致）。"""
+    d = Path(data_dir or settings.data_dir)
+    return _read_chip_table(d)
+
+
+def get_chip_symbol(symbol: str, data_dir: Path | None = None) -> dict | None:
+    """查询单只股票的筹码分布与因子；不存在返回 None。"""
+    table = load_chip_table(data_dir)
+    if table.is_empty():
+        return None
+    row = table.filter(pl.col("symbol") == symbol)
+    if row.is_empty():
+        return None
+    data = row.to_dicts()[0]
+    d = data.get("date")
+    if d is not None:
+        data["date"] = d.isoformat() if hasattr(d, "isoformat") else str(d)
+    return data
