@@ -412,6 +412,37 @@ def run_now(
     _refresh_single_view(repo, "kline_enriched")
     _invalidate("enriched")
 
+    # Step 2.2: 筹码分布 — enriched 就绪后计算全市场筹码。
+    # 软失败: 不阻断主管道（与 regime/mainline 一致）。
+    # 全量触发: 首次 / 往前扩展历史 / 数据修正 / 完整性修复（这些都会改变前复权价
+    # 或历史区间,使旧筹码分布失效）; 否则走增量（除权/新增/越界 symbol 重算）。
+    chip_symbols = 0
+    try:
+        chip_dir = repo.store.data_dir / "chip_distribution"
+        chip_exists = (chip_dir / "all.parquet").exists()
+        chip_full = (
+            not chip_exists
+            or backward_extension
+            or override_start_date is not None
+            or repair_start is not None
+        )
+        emit("compute_chip", 88, "计算筹码分布…")
+        from app.services import chip_pipeline
+        if chip_full:
+            chip_symbols = chip_pipeline.compute_chip_table_full(repo.store.data_dir)
+        else:
+            chip_symbols = chip_pipeline.compute_chip_table_incremental(
+                repo.store.data_dir,
+                affected_symbols=set(affected_symbols) if affected_symbols else None,
+            )
+        emit("compute_chip", 89, f"筹码分布完成,{chip_symbols} 只")
+        logger.info("compute_chip: %d symbols (full=%s)", chip_symbols, chip_full)
+        _invalidate("chip")
+    except Exception as e:  # noqa: BLE001
+        logger.warning("compute_chip failed (soft): %s", e)
+        stage_errors.append(f"compute_chip: {e}")
+        skipped.append("compute_chip")
+
     # Step 2.3: 指数 / ETF 同步 — 物理分开存储；ETF 可复权，指数不复权。
     written_index_daily = 0
     written_etf_daily = 0
@@ -638,6 +669,7 @@ def run_now(
         "daily_days": new_daily_days,
         "adj_factor_symbols": len(affected_symbols),
         "enriched_days": written_enriched,
+        "chip_symbols": chip_symbols,
         "index_count": index_count,
         "index_daily_rows": written_index_daily,
         "etf_count": etf_count,
