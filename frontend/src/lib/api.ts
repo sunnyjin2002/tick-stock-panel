@@ -427,6 +427,40 @@ export interface OverviewMarket {
   industry_rank: { leading: OverviewDimensionRankItem[]; lagging: OverviewDimensionRankItem[] }
 }
 
+// ===== 筹码分布 (CYQ) =====
+export interface ChipData {
+  symbol: string
+  date: string
+  price_grid: number[]
+  distribution: number[]
+  profit_ratio: number
+  concentration_90: number
+  avg_cost_deviation: number
+  single_peak_ratio: number
+  single_peak_width: number
+  is_low_position: boolean
+  avg_cost: number
+  current_price: number
+}
+
+export interface ChipFactorsItem {
+  symbol: string
+  date: string
+  profit_ratio: number
+  concentration_90: number
+  avg_cost_deviation: number
+  single_peak_ratio: number
+  single_peak_width: number
+  is_low_position: boolean
+  avg_cost: number
+  current_price: number
+}
+
+export interface ChipFactorsList {
+  count: number
+  items: ChipFactorsItem[]
+}
+
 // ===== 概念涨幅轮动矩阵 =====
 // dates: 日期字符串列表(最新在最前); columns: {日期: [[概念名, 涨幅小数], ...]} 每列各自降序
 export interface RpsRotationData {
@@ -2280,6 +2314,12 @@ export const api = {
   marketSnapshot: () =>
     request<{ as_of: string | null; rows: MarketSnapshotRow[] }>('/api/screener/market-snapshot'),
   overviewMarket: (asOf?: string) => request<OverviewMarket>(`/api/overview/market${asOf ? `?as_of=${asOf}` : ''}`),
+
+  // 筹码分布 (CYQ)
+  chip: (symbol: string) =>
+    request<ChipData>(`/api/chip/${encodeURIComponent(symbol)}`, { quiet: true }),
+  chipFactors: (symbols?: string[]) =>
+    request<ChipFactorsList>(`/api/chip/factors${symbols?.length ? `?symbols=${encodeURIComponent(symbols.join(','))}` : ''}`),
 
   // 概念涨幅轮动矩阵: 每列(日期)各自把所有概念按当天涨幅从高到低排序
   rpsRotation: (days: number, kind?: 'concept' | 'industry', level?: number) =>

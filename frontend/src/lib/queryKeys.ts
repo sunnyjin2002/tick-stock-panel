@@ -108,6 +108,10 @@ export const QK = {
   // 概念涨幅轮动矩阵
   rpsRotation:          (days: number) => ['rps-rotation', days] as const,
 
+  // 筹码分布 (CYQ)
+  chip:                 (symbol: string) => ['chip', symbol] as const,
+  chipFactors:          ['chip-factors'] as const,
+
   // 市场环境(Regime) — 日级离线计算, 不进 SSE 刷新
   regimeHistory:        (limit?: number) => ['regime-history', limit ?? 0] as const,
   regimeLatest:         ['regime-latest'] as const,

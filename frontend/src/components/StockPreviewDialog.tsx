@@ -1,7 +1,7 @@
 import { useState, useEffect, useMemo } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { motion, AnimatePresence } from 'framer-motion'
-import { X, RefreshCw, Clock, LineChart, Star, RadioTower, Maximize2, Minimize2, Activity } from 'lucide-react'
+import { X, RefreshCw, Clock, LineChart, Star, RadioTower, Maximize2, Minimize2, Activity, BarChart3 } from 'lucide-react'
 import { api } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
 import { cn } from '@/lib/cn'
@@ -10,6 +10,7 @@ import { fmtPct } from '@/lib/format'
 import { StockPanel, getDefaultRange } from '@/components/StockPanel'
 import { WatchlistAddMenu } from '@/components/WatchlistAddMenu'
 import { StockMultiDayIntradayChart } from '@/components/StockMultiDayIntradayChart'
+import { ChipDistributionChart } from '@/components/chip/ChipDistributionChart'
 import { DatePicker } from '@/components/DatePicker'
 import { RuleEditor } from '@/components/monitor/RuleEditor'
 import { PriceAlertDialog } from '@/components/stock-analysis/PriceAlertDialog'
@@ -42,7 +43,7 @@ const PRESETS: { label: string; months: number }[] = [
   { label: '1年', months: 12 },
 ]
 
-type PreviewView = 'daily' | 'intraday'
+type PreviewView = 'daily' | 'intraday' | 'chip'
 interface PriceAlertDraft {
   id: number
   targetPrice: number
@@ -119,6 +120,12 @@ export function StockPreviewDialog({ symbol, name, onClose, triggerInfo }: Props
     () => symbol ? buildMonitorPriceLines(monitorRules.data?.rules ?? [], symbol) : [],
     [monitorRules.data?.rules, symbol],
   )
+  const chipData = useQuery({
+    queryKey: QK.chip(symbol ?? ''),
+    queryFn: () => api.chip(symbol!),
+    enabled: !!symbol && view === 'chip',
+  })
+
   const inWatchlist = (watchlist.data?.symbols ?? []).some((s: any) => s.symbol === symbol)
 
   const toggleWatchlist = useMutation({
@@ -186,6 +193,8 @@ export function StockPreviewDialog({ symbol, name, onClose, triggerInfo }: Props
     if (!symbol) return
     if (view === 'daily') {
       qc.invalidateQueries({ queryKey: ['kline', symbol] })
+    } else if (view === 'chip') {
+      qc.invalidateQueries({ queryKey: QK.chip(symbol) })
     } else {
       qc.invalidateQueries({ queryKey: ['kline-minute-range', symbol] })
       qc.invalidateQueries({ queryKey: ['kline-minute', symbol!] })
@@ -282,7 +291,7 @@ export function StockPreviewDialog({ symbol, name, onClose, triggerInfo }: Props
                       min={dateRange.start}
                     />
                   </div>
-                ) : (
+                ) : view === 'intraday' ? (
                   <div className="flex items-center gap-1">
                     <div className="inline-flex shrink-0 items-center rounded border border-border bg-elevated p-0.5" aria-label="分时周期">
                       {dayOptions.map(days => (
@@ -302,7 +311,7 @@ export function StockPreviewDialog({ symbol, name, onClose, triggerInfo }: Props
                       ))}
                     </div>
                   </div>
-                )}
+                ) : null}
 
                 <span className="mx-0.5 h-4 w-px shrink-0 bg-border" />
 
@@ -331,6 +340,18 @@ export function StockPreviewDialog({ symbol, name, onClose, triggerInfo }: Props
                   >
                     <Clock className="h-3 w-3" />
                     分时
+                  </button>
+                  <button
+                    type="button"
+                    role="tab"
+                    aria-selected={view === 'chip'}
+                    onClick={() => setView('chip')}
+                    className={`inline-flex h-6 items-center gap-1 rounded px-2 text-[11px] transition-colors ${
+                      view === 'chip' ? 'bg-surface text-foreground shadow-sm' : 'text-muted hover:text-secondary'
+                    }`}
+                  >
+                    <BarChart3 className="h-3 w-3" />
+                    筹码
                   </button>
                 </div>
 
@@ -492,7 +513,7 @@ export function StockPreviewDialog({ symbol, name, onClose, triggerInfo }: Props
                   onPriceDoubleClick={openPriceAlert}
                   refetchIntervalMs={intradayRefetchMs}
                 />
-              ) : (
+              ) : view === 'intraday' ? (
                 <>
                 <StockPanel
                   symbol={symbol}
@@ -508,6 +529,16 @@ export function StockPreviewDialog({ symbol, name, onClose, triggerInfo }: Props
                   onPriceDoubleClick={openPriceAlert}
                 />
                 </>
+              ) : (
+                chipData.data ? (
+                  <ChipDistributionChart data={chipData.data} height={480} />
+                ) : chipData.isPending ? (
+                  <div className="flex h-[480px] items-center justify-center text-sm text-muted">加载筹码分布…</div>
+                ) : (
+                  <div className="flex h-[480px] items-center justify-center text-sm text-muted">
+                    暂无筹码数据（请先在数据页运行盘后管道）
+                  </div>
+                )
               )}
             </div>
 

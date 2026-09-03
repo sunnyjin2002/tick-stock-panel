@@ -57,6 +57,7 @@ _CHIP_SCHEMA: dict[str, pl.DataType] = {
     "single_peak_width": pl.Float64,
     "is_low_position": pl.Boolean,
     "avg_cost": pl.Float64,
+    "current_price": pl.Float64,
 }
 
 # 筛选/列表查询用到的因子列（不含分布数组，减小批量响应体积）
@@ -70,6 +71,7 @@ CHIP_FACTOR_COLS = [
     "single_peak_width",
     "is_low_position",
     "avg_cost",
+    "current_price",
 ]
 
 
@@ -108,6 +110,7 @@ def build_chip_table(
     single_peak_width: list[float] = []
     is_low_position: list[bool] = []
     avg_cost: list[float] = []
+    current_prices: list[float] = []
 
     for _key, group in df.group_by("symbol", maintain_order=True):
         symbol = group["symbol"][0]  # 取标量字符串，规避 polars>=1.3x 迭代 key 变为 tuple
@@ -138,6 +141,7 @@ def build_chip_table(
         single_peak_width.append(factors.single_peak_width)
         is_low_position.append(factors.is_low_position)
         avg_cost.append(factors.avg_cost)
+        current_prices.append(float(close[-1]))
 
     return pl.DataFrame({
         "symbol": pl.Series(symbols, dtype=pl.Utf8),
@@ -151,6 +155,7 @@ def build_chip_table(
         "single_peak_width": pl.Series(single_peak_width, dtype=pl.Float64),
         "is_low_position": pl.Series(is_low_position, dtype=pl.Boolean),
         "avg_cost": pl.Series(avg_cost, dtype=pl.Float64),
+        "current_price": pl.Series(current_prices, dtype=pl.Float64),
     })
 
 
@@ -231,6 +236,7 @@ def advance_chip_table(
         new_row["single_peak_width"] = factors.single_peak_width
         new_row["is_low_position"] = factors.is_low_position
         new_row["avg_cost"] = factors.avg_cost
+        new_row["current_price"] = float(full_close[-1])
         rows.append(new_row)
 
     if not rows:

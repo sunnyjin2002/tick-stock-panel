@@ -35,6 +35,7 @@ def _write_chip_parquet(data_dir: Path) -> None:
         "single_peak_width": pl.Series([0.1, 0.2], dtype=pl.Float64),
         "is_low_position": pl.Series([True, False], dtype=pl.Boolean),
         "avg_cost": pl.Series([10.5, 11.0], dtype=pl.Float64),
+        "current_price": pl.Series([10.6, 10.9], dtype=pl.Float64),
     }).write_parquet(chip_dir / "all.parquet")
 
 
@@ -58,6 +59,7 @@ def test_get_chip_returns_distribution(tmp_path):
     assert abs(sum(data["distribution"]) - 1.0) < 1e-9
     assert data["profit_ratio"] == pytest.approx(0.6)
     assert data["is_low_position"] is True
+    assert data["current_price"] == pytest.approx(10.6)
     assert isinstance(data["date"], str)
 
 

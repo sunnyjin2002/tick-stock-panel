@@ -8,11 +8,11 @@ export interface FrontendSlotContextMap {
     collapsed: boolean
     pathname: string
   }
-  /** 个股详情对话框底部扩展区 (日K/分时图表下方) */
+  /** 个股详情对话框底部扩展区 (日K/分时/筹码图表下方) */
   'stock-preview.footer': {
     symbol: string
     name: string | null
-    view: 'daily' | 'intraday'
+    view: 'daily' | 'intraday' | 'chip'
   }
   /** 自选页工具栏扩展区 (按钮行末尾) */
   'watchlist.toolbar': {
