@@ -1,8 +1,8 @@
-import { useEffect, useRef, useMemo, useState } from 'react'
+import { useEffect, useRef, useMemo, useState, type ReactNode } from 'react'
 import { chartTheme, getTheme, useTheme } from '@/lib/theme'
 import * as echarts from 'echarts'
 import type { ECharts, EChartsOption } from 'echarts'
-import type { KlineRow, LevelSeries } from '@/lib/api'
+import type { KlineRow, LevelSeries, ChipData } from '@/lib/api'
 
 /**
  * 个股分析专用日 K 图表。
@@ -25,6 +25,10 @@ const THEME = {
   bear: '#2D9B65',
   volUp: 'rgba(240,68,56,0.5)',
   volDown: 'rgba(18,183,106,0.5)',
+  ma5: '#A1A1AA',
+  ma10: '#3B82F6',
+  ma20: '#F97316',
+  ma60: '#8B5CF6',
 }
 
 /** 当前主题的图表调色板 (buildOption 渲染时调用; 切换由组件 effect 触发重建)。 */
@@ -105,6 +109,12 @@ interface Props {
   ranges?: ChartRange[]
   /** 预留:点击某根 K 线 */
   onDateClick?: (date: string) => void
+  /** 筹码分布数据；传入时在 K 线右侧叠加筹码面板 */
+  chipData?: ChipData | null
+  /** 是否显示 MA 均线(MA5/10/20/60)，默认 true */
+  showMA?: boolean
+  /** 图表上方额外工具栏（如「指标查看」按钮行），渲染在「关键价位」按钮行之后 */
+  toolbarExtra?: ReactNode
   height?: number
   className?: string
 }
@@ -120,6 +130,9 @@ export function AnalysisKChart({
   markers,
   ranges,
   onDateClick,
+  chipData,
+  showMA = true,
+  toolbarExtra,
   height = 460,
   className,
 }: Props) {
@@ -127,6 +140,24 @@ export function AnalysisKChart({
   const chartInstRef = useRef<ECharts | null>(null)
   /** seriesIndex → levelKey 映射, buildOption 填充, ECharts hover 事件反查 */
   const seriesKeyMapRef = useRef<Map<number, string>>(new Map())
+  const chipDataRef = useRef(chipData)
+  chipDataRef.current = chipData
+  // 筹码 y 轴跟随主图 y 轴范围（用 ref 供 dataZoom 回调取最新值，避免闭包过期）
+  const syncChipYAxisRef = useRef<() => void>(() => {})
+  syncChipYAxisRef.current = () => {
+    const chart = chartInstRef.current
+    const chip = chipDataRef.current
+    if (!chart || !chip || !chip.price_grid?.length) return
+    const chartAny = chart as any
+    const mainModel = chartAny.getModel().getComponent('yAxis', 0)
+    const chipModel = chartAny.getModel().getComponent('yAxis', 2)
+    if (!mainModel || !chipModel) return
+    const extent = mainModel.axis.scale.getExtent() as [number, number]
+    const chipExtent = chipModel.axis.scale.getExtent() as [number, number]
+    if (Math.abs(extent[0] - chipExtent[0]) > 1e-9 || Math.abs(extent[1] - chipExtent[1]) > 1e-9) {
+      chart.setOption({ yAxis: [{}, {}, { min: extent[0], max: extent[1], scale: false }] }, { lazyUpdate: true })
+    }
+  }
   // 主题: buildOption 内部用 CT() 动态取色, 这里只负责切换时触发重建
   const theme = useTheme()
   const [activeTypes, setActiveTypes] = useState<Set<LevelType>>(new Set(defaultLevelTypes))
@@ -240,6 +271,21 @@ export function AnalysisKChart({
       },
     ]
 
+    // 均线 MA5/10/20/60 —— 主图叠加线（与个股预览对话框同款）
+    const hasMA = showMA && rows.some(r => r.ma5 != null || r.ma10 != null || r.ma20 != null || r.ma60 != null)
+    if (hasMA) {
+      const maLine = (key: 'ma5' | 'ma10' | 'ma20' | 'ma60', color: string, name: string) => ({
+        name, type: 'line',
+        data: rows.map(r => (r[key] != null ? Number(r[key]) : '-')),
+        smooth: true, symbol: 'none', animation: false, silent: true,
+        lineStyle: { width: 1, color }, itemStyle: { color },
+      })
+      series.push(maLine('ma5', THEME.ma5, 'MA5'))
+      series.push(maLine('ma10', THEME.ma10, 'MA10'))
+      series.push(maLine('ma20', THEME.ma20, 'MA20'))
+      series.push(maLine('ma60', THEME.ma60, 'MA60'))
+    }
+
     // 价位水平线 —— 用 line series(恒定值)画水平线,endLabel 显示标签文字;
     // 与通道曲线一致,标签落在右侧 grid.right 预留带(外侧),不压蜡烛。
     // hoveredKey 非空时:命中线加粗高亮,其它线淡化(opacity 0.15),形成聚焦效果。
@@ -324,6 +370,80 @@ export function AnalysisKChart({
     }
     seriesKeyMapRef.current = keyMap
 
+    // ===== 筹码面板（K 线右侧，与主图共享价格轴）=====
+    const CHIP_W = 92
+    const CHIP_GAP = 10
+    let gridRight = 144
+    let chipGrid: any = null
+    let chipXAxis: any = null
+    let chipYAxis: any = null
+    if (chipData && chipData.price_grid?.length > 0) {
+      gridRight = 144 + CHIP_W + CHIP_GAP + 8
+      const chipPrice = chipData.price_grid
+      const chipDist = chipData.distribution
+      const chipCurrent = chipData.current_price
+      const chipAvg = chipData.avg_cost
+      const chipMaxDist = Math.max(1e-9, ...chipDist) * 1.15
+      const chipBinW = chipPrice.length > 1 ? chipPrice[1] - chipPrice[0] : 1
+
+      chipGrid = { right: 6, width: CHIP_W, top: 16, height: mainH }
+      chipXAxis = {
+        type: 'value', gridIndex: 2, min: 0, max: chipMaxDist,
+        axisLine: { show: false }, axisTick: { show: false },
+        axisLabel: { show: false }, splitLine: { show: false },
+        axisPointer: { show: false },
+      }
+      chipYAxis = {
+        type: 'value', gridIndex: 2, position: 'right', scale: true,
+        axisLine: { show: false }, axisTick: { show: false },
+        splitLine: { show: false },
+        axisLabel: { color: CT().text, fontSize: 9, fontFamily: 'JetBrains Mono, monospace' },
+      }
+      series.push({
+        type: 'custom',
+        name: '筹码',
+        xAxisIndex: 2,
+        yAxisIndex: 2,
+        z: 5,
+        renderItem: (params: any, api: any) => {
+          const amount = api.value(0)
+          const price = api.value(1)
+          const half = chipBinW / 2
+          const start = api.coord([0, price - half])
+          const end = api.coord([amount, price + half])
+          const rect = echarts.graphic.clipRectByRect(
+            { x: start[0], y: end[1], width: end[0] - start[0], height: start[1] - end[1] },
+            { x: params.coordSys.x, y: params.coordSys.y, width: params.coordSys.width, height: params.coordSys.height },
+          )
+          return rect ? { type: 'rect', shape: rect, style: api.style() } : undefined
+        },
+        data: chipDist.map((d, i) => ({
+          value: [d, chipPrice[i]],
+          itemStyle: { color: chipPrice[i] <= chipCurrent ? THEME.bull : THEME.bear },
+        })),
+        markLine: {
+          symbol: 'none',
+          label: { color: CT().textStrong, fontSize: 9 },
+          data: [
+            {
+              name: '现价',
+              yAxis: chipCurrent,
+              lineStyle: { color: '#F59E0B', width: 1.5, type: 'dashed' },
+              label: { formatter: `现价 ${chipCurrent.toFixed(2)}` },
+              tooltipText: '现价线：当前成交价，其下方红色为获利盘、上方绿色为套牢盘',
+            },
+            {
+              name: '均价',
+              yAxis: chipAvg,
+              lineStyle: { color: '#8B5CF6', width: 1, type: 'dashed' },
+              label: { formatter: `均价 ${chipAvg.toFixed(2)}` },
+              tooltipText: '平均成本线：全部流通筹码的加权平均成本，代表市场整体持仓成本',
+            },
+          ],
+        },
+      })
+    }
+
     return {
       animation: false,
       backgroundColor: 'transparent',
@@ -331,8 +451,9 @@ export function AnalysisKChart({
       // 价位线右端的标签文字显示在这条预留带里,不压在蜡烛上。
       // 预留 ~144px:最长标签(如「成交密集区(POC) 12.34」)约 13 字符,fontSize 9 等宽。
       grid: [
-        { left: 56, right: 144, top: 16, height: mainH },
-        { left: 56, right: 144, top: volTop, height: volH },
+        { left: 56, right: gridRight, top: 16, height: mainH },
+        { left: 56, right: gridRight, top: volTop, height: volH },
+        ...(chipGrid ? [chipGrid] : []),
       ],
       xAxis: [
         {
@@ -346,6 +467,7 @@ export function AnalysisKChart({
           type: 'category', gridIndex: 1, data: dates, boundaryGap: true,
           axisLabel: { show: false }, axisLine: { show: false }, axisTick: { show: false },
         },
+        ...(chipXAxis ? [chipXAxis] : []),
       ],
       yAxis: [
         { scale: true, splitLine: { lineStyle: { color: CT().grid } },
@@ -355,6 +477,7 @@ export function AnalysisKChart({
           splitLine: { show: false },
           axisLabel: { color: CT().text, fontSize: 9, fontFamily: 'JetBrains Mono, monospace',
                        formatter: (v: number) => fmtVol(v) } },
+        ...(chipYAxis ? [chipYAxis] : []),
       ],
       dataZoom: [
         { type: 'inside', xAxisIndex: [0, 1], start: zoomStart, end: 100 },
@@ -362,8 +485,15 @@ export function AnalysisKChart({
           borderColor: 'transparent', fillerColor: CT().zoomFill,
           handleStyle: { color: '#52525B' }, textStyle: { color: CT().text, fontSize: 10 } },
       ],
-      // 不弹 hover tooltip(用户要求);但保留十字线 axisPointer 作为缩放/定位参照
-      tooltip: { show: false },
+      // 只在筹码 markLine 上弹 tooltip 说明;K线/成交量/价位线 hover 不弹 tooltip
+      tooltip: {
+        show: true,
+        trigger: 'item',
+        formatter: (params: any) => {
+          const p = Array.isArray(params) ? params[0] : params
+          return p?.componentType === 'markLine' ? (p.data?.tooltipText ?? '') : ''
+        },
+      },
       axisPointer: { link: [{ xAxisIndex: 'all' }] },
       series,
     }
@@ -372,6 +502,7 @@ export function AnalysisKChart({
   // 初始化 + 数据更新
   useEffect(() => {
     if (!chartRef.current) return
+
     if (!chartInstRef.current) {
       chartInstRef.current = echarts.init(chartRef.current, undefined, { renderer: 'canvas' })
       chartInstRef.current.on('click', (params: any) => {
@@ -380,6 +511,7 @@ export function AnalysisKChart({
           onDateClick(dates[params.dataIndex])
         }
       })
+      chartInstRef.current.on('dataZoom', () => syncChipYAxisRef.current())
       // hover 价位线/曲线 endLabel → 联动高亮(与下方文字行双向联动)
       chartInstRef.current.on('mouseover', (params: any) => {
         if (params.componentType === 'series') {
@@ -390,8 +522,9 @@ export function AnalysisKChart({
       chartInstRef.current.on('globalout', () => setHoveredKey(null))
     }
     chartInstRef.current.setOption(buildOption(), true)
+    requestAnimationFrame(() => syncChipYAxisRef.current())
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [rows, levels, series, seriesDates, activeTypes, pivotRank, markers, ranges, height, theme, hoveredKey])
+  }, [rows, levels, series, seriesDates, activeTypes, pivotRank, markers, ranges, height, theme, hoveredKey, chipData, showMA])
 
   // resize
   useEffect(() => {
@@ -466,6 +599,7 @@ export function AnalysisKChart({
           )}
         </div>
       )}
+      {toolbarExtra}
       {/* 图表:右侧预留带(grid.right 预留)显示价位标签文字,不压蜡烛 */}
       <div ref={chartRef} style={{ width: '100%', height }} />
 

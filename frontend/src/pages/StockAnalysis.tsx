@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { Sparkles, LineChart, History as HistoryIcon, Loader2, ExternalLink, Bell, AlertTriangle } from 'lucide-react'
+import { Sparkles, LineChart, History as HistoryIcon, Loader2, ExternalLink, Bell, AlertTriangle, BarChart3 } from 'lucide-react'
 import { PageHeader } from '@/components/PageHeader'
 import { EmptyState } from '@/components/EmptyState'
 import { StockFinancialSearch } from '@/components/financials/StockFinancialSearch'
@@ -189,6 +189,14 @@ function StockAnalysisBoard({ symbol }: { symbol: string }) {
     staleTime: 60_000,
   })
 
+  const [showChip, setShowChip] = useState(false)
+  const [showMA, setShowMA] = useState(true)
+  const chipData = useQuery({
+    queryKey: QK.chip(symbol),
+    queryFn: () => api.chip(symbol),
+    enabled: !!symbol && showChip,
+  })
+
   if (kline.isLoading) {
     return <div className="flex items-center justify-center py-20"><Loader2 className="h-5 w-5 animate-spin text-muted" /></div>
   }
@@ -216,6 +224,37 @@ function StockAnalysisBoard({ symbol }: { symbol: string }) {
   const curClose = levelsQ.data?.close
   const isUp = prev ? (last.close >= prev.close) : (last.close >= last.open)
 
+  const toolbarExtra = (
+    <div className="flex flex-wrap items-center gap-1.5 mb-2">
+      <span className="text-[10px] text-muted mr-1">指标查看</span>
+      <button
+        type="button"
+        aria-pressed={showMA}
+        onClick={() => setShowMA(v => !v)}
+        title={showMA ? '关闭MA均线' : '显示MA均线(MA5/10/20/60)'}
+        className={`inline-flex items-center gap-1 h-6 px-2 rounded-md text-[10px] font-medium border transition-all ${
+          showMA ? 'text-foreground' : 'text-muted bg-base/40 border-border/30 hover:border-border/60'
+        }`}
+        style={showMA ? { borderColor: '#A1A1AA66', backgroundColor: '#A1A1AA1a' } : undefined}
+      >
+        MA均线
+      </button>
+      <button
+        type="button"
+        aria-pressed={showChip}
+        onClick={() => setShowChip(v => !v)}
+        title={showChip ? '关闭筹码分布' : '在K线右侧显示筹码分布'}
+        className={`inline-flex items-center gap-1 h-6 px-2 rounded-md text-[10px] font-medium border transition-all ${
+          showChip ? 'text-foreground' : 'text-muted bg-base/40 border-border/30 hover:border-border/60'
+        }`}
+        style={showChip ? { borderColor: '#8B5CF666', backgroundColor: '#8B5CF61a' } : undefined}
+      >
+        <BarChart3 className="h-3 w-3" />
+        筹码
+      </button>
+    </div>
+  )
+
   return (
     <div className="rounded-card border border-border/60 bg-surface/40 overflow-hidden">
       <div className="px-4 py-3 border-b border-border/40">
@@ -224,13 +263,15 @@ function StockAnalysisBoard({ symbol }: { symbol: string }) {
             <LineChart className="h-4 w-4 text-sky-400 shrink-0" />
             <span className="text-sm font-medium text-foreground">关键价位分析</span>
           </div>
-          <div className="flex items-baseline gap-2 shrink-0">
-            <span className="text-[10px] text-muted">{rows.length} 个交易日</span>
-            <span className="text-[10px] text-muted/60">·</span>
-            <span className="text-[10px] text-muted">当前价</span>
-            <span className={`text-base font-mono font-bold ${isUp ? 'text-bull' : 'text-bear'}`}>
-              {curClose?.toFixed(2) ?? '—'}
-            </span>
+          <div className="flex items-center gap-3 shrink-0">
+            <div className="flex items-baseline gap-2">
+              <span className="text-[10px] text-muted">{rows.length} 个交易日</span>
+              <span className="text-[10px] text-muted/60">·</span>
+              <span className="text-[10px] text-muted">当前价</span>
+              <span className={`text-base font-mono font-bold ${isUp ? 'text-bull' : 'text-bear'}`}>
+                {curClose?.toFixed(2) ?? '—'}
+              </span>
+            </div>
           </div>
         </div>
       </div>
@@ -241,6 +282,9 @@ function StockAnalysisBoard({ symbol }: { symbol: string }) {
           series={levelsQ.data?.series}
           seriesDates={levelsQ.data?.dates}
           defaultLevelTypes={['sr', 'pivot', 'keltner_s']}
+          chipData={showChip ? (chipData.data ?? null) : null}
+          showMA={showMA}
+          toolbarExtra={toolbarExtra}
           height={480}
         />
       </div>

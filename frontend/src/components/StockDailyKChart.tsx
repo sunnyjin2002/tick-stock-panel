@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { api, type KlineRow } from '@/lib/api'
+import { api, type KlineRow, type ChipData } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
 import { storage } from '@/lib/storage'
 import {
@@ -56,6 +56,8 @@ interface Props {
   extColumns?: string
   /** 日K自动刷新间隔(ms)。undefined = 不轮询(默认)。个股对话框实时刷新时传入, 盘中今日蜡烛随之更新 */
   refetchIntervalMs?: number
+  /** 筹码分布数据；传入时在 K 线右侧叠加筹码面板 */
+  chipData?: ChipData | null
 }
 
 function isValidRow(r: any): boolean {
@@ -139,6 +141,7 @@ export function StockDailyKChart({
   onDataChange,
   extColumns,
   refetchIntervalMs,
+  chipData,
 }: Props) {
   const [activeIndicators, setActiveIndicators] = useState<string[]>(['vol'])
   const [showMarkers, setShowMarkers] = useState(true)
@@ -289,6 +292,7 @@ export function StockDailyKChart({
           visibleBars={visibleBars}
           activeIndicators={activeIndicators}
           volumeCompare={volumeCompare}
+          chipData={chipData}
         />
       )}
     </div>

@@ -1,6 +1,6 @@
 import { useEffect, useState, useCallback, useRef, useMemo } from 'react'
 import { X } from 'lucide-react'
-import { type KlineRow, type FinancialMetricRecord } from '@/lib/api'
+import { type KlineRow, type FinancialMetricRecord, type ChipData } from '@/lib/api'
 import { StockInfoBar } from '@/components/StockInfoBar'
 import { StockDailyKChart, getDefaultRange, type StockDailyKChartResult } from '@/components/StockDailyKChart'
 import { StockIntradayChart } from '@/components/StockIntradayChart'
@@ -40,6 +40,8 @@ interface Props {
   refetchIntervalMs?: number
   /** 只渲染信息条, 隐藏图表 (用于分时 tab 共享信息条) */
   infoBarOnly?: boolean
+  /** 筹码分布数据；传入时在日K右侧叠加筹码面板 */
+  chipData?: ChipData | null
 }
 
 export { getDefaultRange }
@@ -64,6 +66,7 @@ export function StockPanel({
   watchlistPending,
   refetchIntervalMs,
   infoBarOnly = false,
+  chipData,
 }: Props) {
   const [linkedPrice, setLinkedPrice] = useState<number | null>(null)
   const [selectedDate, setSelectedDate] = useState<string | null>(null)
@@ -168,6 +171,7 @@ export function StockPanel({
           visibleBars={showIntraday ? 40 : 60}
           extColumns={extColumns}
           refetchIntervalMs={refetchIntervalMs}
+          chipData={chipData}
         />
 
         {showIntraday && selectedDate && !intradayDismissed && (
