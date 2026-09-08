@@ -440,6 +440,7 @@ export interface ChipData {
   single_peak_width: number
   is_low_position: boolean
   avg_cost: number
+  main_cost: number
   current_price: number
 }
 
@@ -453,12 +454,31 @@ export interface ChipFactorsItem {
   single_peak_width: number
   is_low_position: boolean
   avg_cost: number
+  main_cost: number
   current_price: number
 }
 
 export interface ChipFactorsList {
   count: number
   items: ChipFactorsItem[]
+}
+
+export interface ChipHistoryDay {
+  date: string
+  /** 归一化总筹码分布（长度 100） */
+  distribution: number[]
+  /** 当日新增筹码分布（长度 100，蓝色叠加用） */
+  daily_new: number[]
+  /** 该日平均成本（前复权价） */
+  avg_cost: number
+  /** 该日主力成本（主峰加权均价，前复权价） */
+  main_cost: number
+}
+
+export interface ChipHistoryData {
+  symbol: string
+  price_grid: number[]
+  days: ChipHistoryDay[]
 }
 
 // ===== 概念涨幅轮动矩阵 =====
@@ -2318,6 +2338,8 @@ export const api = {
   // 筹码分布 (CYQ)
   chip: (symbol: string) =>
     request<ChipData>(`/api/chip/${encodeURIComponent(symbol)}`, { quiet: true }),
+  chipHistory: (symbol: string) =>
+    request<ChipHistoryData>(`/api/chip/${encodeURIComponent(symbol)}/history`, { quiet: true }),
   chipFactors: (symbols?: string[]) =>
     request<ChipFactorsList>(`/api/chip/factors${symbols?.length ? `?symbols=${encodeURIComponent(symbols.join(','))}` : ''}`),
 

@@ -2,7 +2,7 @@ import { useEffect, useRef, useCallback, useMemo } from 'react'
 import { chartTheme, getTheme, useTheme } from '@/lib/theme'
 import * as echarts from 'echarts'
 import type { ECharts, EChartsOption } from 'echarts'
-import type { ChipData } from '@/lib/api'
+import type { ChipData, ChipHistoryData } from '@/lib/api'
 
 export interface OHLC {
   date: string
@@ -342,6 +342,8 @@ interface Props {
   volumeCompare?: VolumeCompareConfig
   /** 筹码分布数据；传入时在 K 线右侧叠加筹码面板 */
   chipData?: ChipData | null
+  /** 每日筹码分布序列（悬浮 K 线看历史筹码峰 + 蓝色当日筹码） */
+  chipHistory?: ChipHistoryData | null
 }
 
 // 序列颜色 (双主题通用); 画布轴/网格/文字等主题相关色走 CT() 动态取
@@ -481,6 +483,7 @@ function buildOption(
   linkedPrice: number | null | undefined,
   volumeCompare: VolumeCompareConfig,
   chipData: ChipData | null | undefined,
+  chipHistory: ChipHistoryData | null | undefined,
 ): EChartsOption {
   const candleData = data.map(d => [d.open, d.close, d.low, d.high])
 
@@ -770,8 +773,52 @@ function buildOption(
     const chipDist = chipData.distribution
     const chipCurrent = chipData.current_price
     const chipAvg = chipData.avg_cost
+    const chipMain = chipData.main_cost
+    const hasMainCost = Number.isFinite(chipMain)
     const chipMaxDist = Math.max(1e-9, ...chipDist) * 1.15
     const chipBinW = chipPrice.length > 1 ? chipPrice[1] - chipPrice[0] : 1
+
+    const chipRenderItem = (params: any, api: any) => {
+      // value: [amount, price] —— 从 x=0 到 amount
+      const amount = api.value(0)
+      const price = api.value(1)
+      const half = chipBinW / 2
+      const start = api.coord([0, price - half])
+      const end = api.coord([amount, price + half])
+      const rect = echarts.graphic.clipRectByRect(
+        { x: start[0], y: end[1], width: end[0] - start[0], height: start[1] - end[1] },
+        { x: params.coordSys.x, y: params.coordSys.y, width: params.coordSys.width, height: params.coordSys.height },
+      )
+      return rect ? { type: 'rect', shape: rect, style: api.style() } : undefined
+    }
+    const chipDailyRenderItem = (params: any, api: any) => {
+      // value: [startAmount, amount, price] —— 蓝色当日筹码在旧筹码右侧
+      const startAmount = api.value(0)
+      const amount = api.value(1)
+      const price = api.value(2)
+      const half = chipBinW / 2
+      const start = api.coord([startAmount, price - half])
+      const end = api.coord([startAmount + amount, price + half])
+      const rect = echarts.graphic.clipRectByRect(
+        { x: start[0], y: end[1], width: end[0] - start[0], height: start[1] - end[1] },
+        { x: params.coordSys.x, y: params.coordSys.y, width: params.coordSys.width, height: params.coordSys.height },
+      )
+      return rect ? { type: 'rect', shape: rect, style: api.style() } : undefined
+    }
+    const chipHistoryDays = chipHistory?.days ?? []
+    const chipLastDay = chipHistoryDays.length > 0 ? chipHistoryDays[chipHistoryDays.length - 1] : null
+    const chipDailyDist = chipLastDay?.daily_new ?? Array(chipPrice.length).fill(0)
+    const chipTotalData = chipDist.map((d, i) => {
+      const daily = chipDailyDist[i] ?? 0
+      return {
+        value: [Math.max(0, d - daily), chipPrice[i]],
+        itemStyle: { color: chipPrice[i] <= chipCurrent ? THEME.bull : THEME.bear },
+      }
+    })
+    const chipDailyData = chipDailyDist.map((d, i) => ({
+      value: [Math.max(0, chipDist[i] - d), d, chipPrice[i]],
+      itemStyle: { color: '#3B82F6' },
+    }))
 
     const chipGridIdx = grids.length
     const chipXAxisIdx = xAxes.length
@@ -796,27 +843,14 @@ function buildOption(
 
     series.push({
       type: 'custom',
+      id: 'chip-total',
       name: '筹码',
       xAxisIndex: chipXAxisIdx,
       yAxisIndex: chipYAxisIdx,
       silent: true,
       z: 5,
-      renderItem: (params: any, api: any) => {
-        const amount = api.value(0)
-        const price = api.value(1)
-        const half = chipBinW / 2
-        const start = api.coord([0, price - half])
-        const end = api.coord([amount, price + half])
-        const rect = echarts.graphic.clipRectByRect(
-          { x: start[0], y: end[1], width: end[0] - start[0], height: start[1] - end[1] },
-          { x: params.coordSys.x, y: params.coordSys.y, width: params.coordSys.width, height: params.coordSys.height },
-        )
-        return rect ? { type: 'rect', shape: rect, style: api.style() } : undefined
-      },
-      data: chipDist.map((d, i) => ({
-        value: [d, chipPrice[i]],
-        itemStyle: { color: chipPrice[i] <= chipCurrent ? THEME.bull : THEME.bear },
-      })),
+      renderItem: chipRenderItem,
+      data: chipTotalData,
       markLine: {
         symbol: 'none',
         label: { color: CT().textStrong, fontSize: 9 },
@@ -824,19 +858,37 @@ function buildOption(
           {
             name: '现价',
             yAxis: chipCurrent,
-            lineStyle: { color: '#F59E0B', width: 1.5, type: 'dashed' },
+            lineStyle: { color: '#FFFFFF', width: 1.5, type: 'dashed' },
             label: { formatter: `现价 ${chipCurrent.toFixed(2)}` },
             tooltip: { formatter: '现价线：当前成交价，其下方红色为获利盘、上方绿色为套牢盘' },
           },
+          ...(hasMainCost ? [{
+            name: '主力成本',
+            yAxis: chipMain,
+            lineStyle: { color: '#8B5CF6', width: 1.5, type: 'dashed' },
+            label: { formatter: `主力 ${chipMain.toFixed(2)}` },
+            tooltip: { formatter: '主力成本线：筹码最密集峰的中心价位，代表主力持仓成本区；与平均成本线重合时为「双线合一」' },
+          }] : []),
           {
             name: '均价',
             yAxis: chipAvg,
-            lineStyle: { color: '#8B5CF6', width: 1, type: 'dashed' },
+            lineStyle: { color: '#EAB308', width: 1, type: 'dashed' },
             label: { formatter: `均价 ${chipAvg.toFixed(2)}` },
             tooltip: { formatter: '平均成本线：全部流通筹码的加权平均成本，代表市场整体持仓成本' },
           },
         ],
       },
+    })
+    series.push({
+      type: 'custom',
+      id: 'chip-daily',
+      name: '当日筹码',
+      xAxisIndex: chipXAxisIdx,
+      yAxisIndex: chipYAxisIdx,
+      silent: true,
+      z: 6,
+      renderItem: chipDailyRenderItem,
+      data: chipDailyData,
     })
   }
 
@@ -901,6 +953,7 @@ export function EChartsCandlestick({
   activeIndicators = [],
   volumeCompare = { enabled: true, days: 1 },
   chipData,
+  chipHistory,
 }: Props) {
   const containerRef = useRef<HTMLDivElement>(null)
   const chartRef = useRef<ECharts | null>(null)
@@ -925,6 +978,8 @@ export function EChartsCandlestick({
   volumeCompareRef.current = volumeCompare
   const chipDataRef = useRef(chipData)
   chipDataRef.current = chipData
+  const chipHistoryRef = useRef(chipHistory)
+  chipHistoryRef.current = chipHistory
   // 筹码 y 轴跟随主图 y 轴范围（横向 dataZoom 会改变主图自动算出的价格范围）
   const syncChipYAxisRef = useRef<() => void>(() => {})
   syncChipYAxisRef.current = () => {
@@ -945,6 +1000,64 @@ export function EChartsCandlestick({
       )
       chart.setOption({ yAxis: patch }, { lazyUpdate: true })
     }
+  }
+  // 悬浮 K 线时把筹码面板切换到对应日期的分布 + 蓝色当日筹码
+  const chipDateRef = useRef<string | null>(null)
+  const syncChipDataRef = useRef<(dateStr: string | null) => void>(() => {})
+  syncChipDataRef.current = (dateStr) => {
+    const chart = chartRef.current
+    const hist = chipHistoryRef.current
+    if (!chart || !hist || !hist.price_grid?.length || !hist.days.length) return
+    const idx = dateStr == null ? hist.days.length - 1 : hist.days.findIndex(x => x.date === dateStr)
+    if (idx < 0) return
+    chipDateRef.current = dateStr
+    const rows = dataRef.current
+    const kIdx = dateStr == null ? rows.length - 1 : rows.findIndex(x => x.date === dateStr)
+    const currentPrice = kIdx >= 0 ? rows[kIdx].close : (rows.length ? rows[rows.length - 1].close : 0)
+    const day = hist.days[idx]
+    const price = hist.price_grid
+    const avgCost = day.avg_cost
+    const mainCost = day.main_cost
+    const totalData = day.distribution.map((v, i) => {
+      const daily = day.daily_new[i] ?? 0
+      return {
+        value: [Math.max(0, v - daily), price[i]],
+        itemStyle: { color: price[i] <= currentPrice ? THEME.bull : THEME.bear },
+      }
+    })
+    const dailyData = day.daily_new.map((v, i) => ({
+      value: [Math.max(0, day.distribution[i] - v), v, price[i]],
+      itemStyle: { color: '#3B82F6' },
+    }))
+    const markLineData: any[] = [
+      {
+        name: '现价',
+        yAxis: currentPrice,
+        lineStyle: { color: '#FFFFFF', width: 1.5, type: 'dashed' },
+        label: { formatter: `现价 ${currentPrice.toFixed(2)}` },
+        tooltip: { formatter: '现价线：当前成交价，其下方红色为获利盘、上方绿色为套牢盘' },
+      },
+      ...(Number.isFinite(mainCost) ? [{
+        name: '主力成本',
+        yAxis: mainCost,
+        lineStyle: { color: '#8B5CF6', width: 1.5, type: 'dashed' },
+        label: { formatter: `主力 ${mainCost.toFixed(2)}` },
+        tooltip: { formatter: '主力成本线：筹码最密集峰的中心价位，代表主力持仓成本区；与平均成本线重合时为「双线合一」' },
+      }] : []),
+      {
+        name: '均价',
+        yAxis: avgCost,
+        lineStyle: { color: '#EAB308', width: 1, type: 'dashed' },
+        label: { formatter: `均价 ${avgCost.toFixed(2)}` },
+        tooltip: { formatter: '平均成本线：全部流通筹码的加权平均成本，代表市场整体持仓成本' },
+      },
+    ]
+    chart.setOption({
+      series: [
+        { id: 'chip-total', data: totalData, markLine: { data: markLineData } },
+        { id: 'chip-daily', data: dailyData },
+      ],
+    }, { lazyUpdate: true })
   }
   const chartHeightRef = useRef(300)
   const subTotalHRef = useRef(0)
@@ -1083,18 +1196,21 @@ export function EChartsCandlestick({
         const d = dataRef.current
         const idx = typeof val === 'number' ? val : d.findIndex(x => x.date === val)
         if (idx >= 0 && idx < d.length) {
-          if (infoIdxRef.current === idx) return
-          infoIdxRef.current = idx
+          if (infoIdxRef.current !== idx) {
+            infoIdxRef.current = idx
 
-          // 直接更新信息栏 DOM (通过 ref 读取最新的生成函数)
-          const infoEl = infoBarRef.current
-          if (infoEl) {
-            const html = getInfoBarHTMLRef.current()
-            if (html) infoEl.innerHTML = html  // 只在有内容时更新
+            // 直接更新信息栏 DOM (通过 ref 读取最新的生成函数)
+            const infoEl = infoBarRef.current
+            if (infoEl) {
+              const html = getInfoBarHTMLRef.current()
+              if (html) infoEl.innerHTML = html  // 只在有内容时更新
+            }
+
+            // 更新子图 graphic
+            triggerInfoBarUpdate()
           }
-
-          // 更新子图 graphic
-          triggerInfoBarUpdate()
+          // 悬浮切换筹码面板到该日（即使 infoIdx 未变也尝试，因重建后可能已回退）
+          syncChipDataRef.current(d[idx].date)
           return
         }
       }
@@ -1145,6 +1261,10 @@ export function EChartsCandlestick({
       syncChipYAxisRef.current()
     })
 
+    chart.on('globalout', () => {
+      syncChipDataRef.current(null)
+    })
+
     const ro = new ResizeObserver(() => { chart.resize() })
     ro.observe(el)
 
@@ -1152,6 +1272,7 @@ export function EChartsCandlestick({
       chart.off('updateAxisPointer')
       chart.off('click')
       chart.off('dataZoom')
+      chart.off('globalout')
       chart.getZr().off('dblclick', handlePriceDoubleClick)
       ro.disconnect()
       chart.dispose()
@@ -1243,6 +1364,7 @@ export function EChartsCandlestick({
       linkedPrice,
       volumeCompare,
       chipData,
+      chipHistory,
     )
 
     chart.setOption(option, true)
@@ -1263,7 +1385,7 @@ export function EChartsCandlestick({
     if (infoEl) {
       infoEl.innerHTML = getInfoBarHTML()
     }
-  }, [data, markers, ranges, priceLines, linkedPrice, showMA, showMarkersProp, activeIndicators, volumeCompare, chipData, chartHeight, dates, dateIndexMap, initialZoom, getInfoBarHTML, theme])
+  }, [data, markers, ranges, priceLines, linkedPrice, showMA, showMarkersProp, activeIndicators, volumeCompare, chipData, chipHistory, chartHeight, dates, dateIndexMap, initialZoom, getInfoBarHTML, theme])
 
   // 渲染信息栏容器 (内容由 JS 直接写入)
   const initialHTML = useMemo(() => {

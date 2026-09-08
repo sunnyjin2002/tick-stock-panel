@@ -2,7 +2,8 @@ import { useEffect, useRef, useMemo, useState, type ReactNode } from 'react'
 import { chartTheme, getTheme, useTheme } from '@/lib/theme'
 import * as echarts from 'echarts'
 import type { ECharts, EChartsOption } from 'echarts'
-import type { KlineRow, LevelSeries, ChipData } from '@/lib/api'
+import type { KlineRow, LevelSeries, ChipData, ChipHistoryData } from '@/lib/api'
+import { ChipFactorSummary } from '@/components/chip/ChipFactorSummary'
 
 /**
  * 个股分析专用日 K 图表。
@@ -111,6 +112,8 @@ interface Props {
   onDateClick?: (date: string) => void
   /** 筹码分布数据；传入时在 K 线右侧叠加筹码面板 */
   chipData?: ChipData | null
+  /** 每日筹码分布序列（悬浮 K 线看历史筹码峰 + 蓝色当日筹码） */
+  chipHistory?: ChipHistoryData | null
   /** 是否显示 MA 均线(MA5/10/20/60)，默认 true */
   showMA?: boolean
   /** 图表上方额外工具栏（如「指标查看」按钮行），渲染在「关键价位」按钮行之后 */
@@ -131,6 +134,7 @@ export function AnalysisKChart({
   ranges,
   onDateClick,
   chipData,
+  chipHistory,
   showMA = true,
   toolbarExtra,
   height = 460,
@@ -157,6 +161,68 @@ export function AnalysisKChart({
     if (Math.abs(extent[0] - chipExtent[0]) > 1e-9 || Math.abs(extent[1] - chipExtent[1]) > 1e-9) {
       chart.setOption({ yAxis: [{}, {}, { min: extent[0], max: extent[1], scale: false }] }, { lazyUpdate: true })
     }
+  }
+  const chipHistoryRef = useRef(chipHistory)
+  chipHistoryRef.current = chipHistory
+  const rowsRef = useRef(rows)
+  rowsRef.current = rows
+  // 悬浮 K 线时把筹码面板切换到对应日期的分布 + 蓝色当日筹码
+  const chipDateRef = useRef<string | null>(null)
+  const syncChipDataRef = useRef<(dateStr: string | null) => void>(() => {})
+  syncChipDataRef.current = (dateStr) => {
+    const chart = chartInstRef.current
+    const hist = chipHistoryRef.current
+    if (!chart || !hist || !hist.price_grid?.length || !hist.days.length) return
+    const idx = dateStr == null ? hist.days.length - 1 : hist.days.findIndex(x => x.date === dateStr)
+    if (idx < 0) return
+    chipDateRef.current = dateStr
+    const rws = rowsRef.current
+    const kIdx = dateStr == null ? rws.length - 1 : rws.findIndex(x => (typeof x.date === 'string' ? x.date.slice(0, 10) : String(x.date)) === dateStr)
+    const currentPrice = kIdx >= 0 ? rws[kIdx].close : (rws.length ? rws[rws.length - 1].close : 0)
+    const day = hist.days[idx]
+    const price = hist.price_grid
+    const avgCost = day.avg_cost
+    const mainCost = day.main_cost
+    const totalData = day.distribution.map((v, i) => {
+      const daily = day.daily_new[i] ?? 0
+      return {
+        value: [Math.max(0, v - daily), price[i]],
+        itemStyle: { color: price[i] <= currentPrice ? THEME.bull : THEME.bear },
+      }
+    })
+    const dailyData = day.daily_new.map((v, i) => ({
+      value: [Math.max(0, day.distribution[i] - v), v, price[i]],
+      itemStyle: { color: '#3B82F6' },
+    }))
+    const markLineData: any[] = [
+      {
+        name: '现价',
+        yAxis: currentPrice,
+        lineStyle: { color: '#FFFFFF', width: 1.5, type: 'dashed' },
+        label: { formatter: `现价 ${currentPrice.toFixed(2)}` },
+        tooltipText: '现价线：当前成交价，其下方红色为获利盘、上方绿色为套牢盘',
+      },
+      ...(Number.isFinite(mainCost) ? [{
+        name: '主力成本',
+        yAxis: mainCost,
+        lineStyle: { color: '#8B5CF6', width: 1.5, type: 'dashed' },
+        label: { formatter: `主力 ${mainCost.toFixed(2)}` },
+        tooltipText: '主力成本线：筹码最密集峰的中心价位，代表主力持仓成本区；与平均成本线重合时为「双线合一」',
+      }] : []),
+      {
+        name: '均价',
+        yAxis: avgCost,
+        lineStyle: { color: '#EAB308', width: 1, type: 'dashed' },
+        label: { formatter: `均价 ${avgCost.toFixed(2)}` },
+        tooltipText: '平均成本线：全部流通筹码的加权平均成本，代表市场整体持仓成本',
+      },
+    ]
+    chart.setOption({
+      series: [
+        { id: 'chip-total', data: totalData, markLine: { data: markLineData } },
+        { id: 'chip-daily', data: dailyData },
+      ],
+    }, { lazyUpdate: true })
   }
   // 主题: buildOption 内部用 CT() 动态取色, 这里只负责切换时触发重建
   const theme = useTheme()
@@ -371,7 +437,7 @@ export function AnalysisKChart({
     seriesKeyMapRef.current = keyMap
 
     // ===== 筹码面板（K 线右侧，与主图共享价格轴）=====
-    const CHIP_W = 92
+    const CHIP_W = 184
     const CHIP_GAP = 10
     let gridRight = 144
     let chipGrid: any = null
@@ -383,8 +449,52 @@ export function AnalysisKChart({
       const chipDist = chipData.distribution
       const chipCurrent = chipData.current_price
       const chipAvg = chipData.avg_cost
+      const chipMain = chipData.main_cost
+      const hasMainCost = Number.isFinite(chipMain)
       const chipMaxDist = Math.max(1e-9, ...chipDist) * 1.15
       const chipBinW = chipPrice.length > 1 ? chipPrice[1] - chipPrice[0] : 1
+
+      const chipRenderItem = (params: any, api: any) => {
+        // value: [amount, price] —— 从 x=0 到 amount
+        const amount = api.value(0)
+        const price = api.value(1)
+        const half = chipBinW / 2
+        const start = api.coord([0, price - half])
+        const end = api.coord([amount, price + half])
+        const rect = echarts.graphic.clipRectByRect(
+          { x: start[0], y: end[1], width: end[0] - start[0], height: start[1] - end[1] },
+          { x: params.coordSys.x, y: params.coordSys.y, width: params.coordSys.width, height: params.coordSys.height },
+        )
+        return rect ? { type: 'rect', shape: rect, style: api.style() } : undefined
+      }
+      const chipDailyRenderItem = (params: any, api: any) => {
+        // value: [startAmount, amount, price] —— 蓝色当日筹码在旧筹码右侧
+        const startAmount = api.value(0)
+        const amount = api.value(1)
+        const price = api.value(2)
+        const half = chipBinW / 2
+        const start = api.coord([startAmount, price - half])
+        const end = api.coord([startAmount + amount, price + half])
+        const rect = echarts.graphic.clipRectByRect(
+          { x: start[0], y: end[1], width: end[0] - start[0], height: start[1] - end[1] },
+          { x: params.coordSys.x, y: params.coordSys.y, width: params.coordSys.width, height: params.coordSys.height },
+        )
+        return rect ? { type: 'rect', shape: rect, style: api.style() } : undefined
+      }
+      const chipHistoryDays = chipHistory?.days ?? []
+      const chipLastDay = chipHistoryDays.length > 0 ? chipHistoryDays[chipHistoryDays.length - 1] : null
+      const chipDailyDist = chipLastDay?.daily_new ?? Array(chipPrice.length).fill(0)
+      const chipTotalData = chipDist.map((d, i) => {
+        const daily = chipDailyDist[i] ?? 0
+        return {
+          value: [Math.max(0, d - daily), chipPrice[i]],
+          itemStyle: { color: chipPrice[i] <= chipCurrent ? THEME.bull : THEME.bear },
+        }
+      })
+      const chipDailyData = chipDailyDist.map((d, i) => ({
+        value: [Math.max(0, chipDist[i] - d), d, chipPrice[i]],
+        itemStyle: { color: '#3B82F6' },
+      }))
 
       chipGrid = { right: 6, width: CHIP_W, top: 16, height: mainH }
       chipXAxis = {
@@ -401,26 +511,13 @@ export function AnalysisKChart({
       }
       series.push({
         type: 'custom',
+        id: 'chip-total',
         name: '筹码',
         xAxisIndex: 2,
         yAxisIndex: 2,
         z: 5,
-        renderItem: (params: any, api: any) => {
-          const amount = api.value(0)
-          const price = api.value(1)
-          const half = chipBinW / 2
-          const start = api.coord([0, price - half])
-          const end = api.coord([amount, price + half])
-          const rect = echarts.graphic.clipRectByRect(
-            { x: start[0], y: end[1], width: end[0] - start[0], height: start[1] - end[1] },
-            { x: params.coordSys.x, y: params.coordSys.y, width: params.coordSys.width, height: params.coordSys.height },
-          )
-          return rect ? { type: 'rect', shape: rect, style: api.style() } : undefined
-        },
-        data: chipDist.map((d, i) => ({
-          value: [d, chipPrice[i]],
-          itemStyle: { color: chipPrice[i] <= chipCurrent ? THEME.bull : THEME.bear },
-        })),
+        renderItem: chipRenderItem,
+        data: chipTotalData,
         markLine: {
           symbol: 'none',
           label: { color: CT().textStrong, fontSize: 9 },
@@ -428,19 +525,36 @@ export function AnalysisKChart({
             {
               name: '现价',
               yAxis: chipCurrent,
-              lineStyle: { color: '#F59E0B', width: 1.5, type: 'dashed' },
+              lineStyle: { color: '#FFFFFF', width: 1.5, type: 'dashed' },
               label: { formatter: `现价 ${chipCurrent.toFixed(2)}` },
               tooltipText: '现价线：当前成交价，其下方红色为获利盘、上方绿色为套牢盘',
             },
+            ...(hasMainCost ? [{
+              name: '主力成本',
+              yAxis: chipMain,
+              lineStyle: { color: '#8B5CF6', width: 1.5, type: 'dashed' },
+              label: { formatter: `主力 ${chipMain.toFixed(2)}` },
+              tooltipText: '主力成本线：筹码最密集峰的中心价位，代表主力持仓成本区；与平均成本线重合时为「双线合一」',
+            }] : []),
             {
               name: '均价',
               yAxis: chipAvg,
-              lineStyle: { color: '#8B5CF6', width: 1, type: 'dashed' },
+              lineStyle: { color: '#EAB308', width: 1, type: 'dashed' },
               label: { formatter: `均价 ${chipAvg.toFixed(2)}` },
               tooltipText: '平均成本线：全部流通筹码的加权平均成本，代表市场整体持仓成本',
             },
           ],
         },
+      })
+      series.push({
+        type: 'custom',
+        id: 'chip-daily',
+        name: '当日筹码',
+        xAxisIndex: 2,
+        yAxisIndex: 2,
+        z: 6,
+        renderItem: chipDailyRenderItem,
+        data: chipDailyData,
       })
     }
 
@@ -515,16 +629,27 @@ export function AnalysisKChart({
       // hover 价位线/曲线 endLabel → 联动高亮(与下方文字行双向联动)
       chartInstRef.current.on('mouseover', (params: any) => {
         if (params.componentType === 'series') {
+          if (params.seriesType === 'candlestick' && params.dataIndex != null) {
+            const r = rowsRef.current[params.dataIndex]
+            const d = r ? (typeof r.date === 'string' ? r.date.slice(0, 10) : String(r.date)) : null
+            if (d) syncChipDataRef.current(d)
+          }
           const k = seriesKeyMapRef.current.get(params.seriesIndex as number)
           if (k) setHoveredKey(k)
         }
       })
-      chartInstRef.current.on('globalout', () => setHoveredKey(null))
+      chartInstRef.current.on('globalout', () => {
+        setHoveredKey(null)
+        syncChipDataRef.current(null)
+      })
     }
     chartInstRef.current.setOption(buildOption(), true)
-    requestAnimationFrame(() => syncChipYAxisRef.current())
+    requestAnimationFrame(() => {
+      syncChipYAxisRef.current()
+      if (chipDateRef.current != null) syncChipDataRef.current(chipDateRef.current)
+    })
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [rows, levels, series, seriesDates, activeTypes, pivotRank, markers, ranges, height, theme, hoveredKey, chipData, showMA])
+  }, [rows, levels, series, seriesDates, activeTypes, pivotRank, markers, ranges, height, theme, hoveredKey, chipData, chipHistory, showMA])
 
   // resize
   useEffect(() => {
@@ -600,6 +725,7 @@ export function AnalysisKChart({
         </div>
       )}
       {toolbarExtra}
+      {chipData && <ChipFactorSummary data={chipData} />}
       {/* 图表:右侧预留带(grid.right 预留)显示价位标签文字,不压蜡烛 */}
       <div ref={chartRef} style={{ width: '100%', height }} />
 

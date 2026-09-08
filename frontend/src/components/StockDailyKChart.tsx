@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { api, type KlineRow, type ChipData } from '@/lib/api'
+import { api, type KlineRow, type ChipData, type ChipHistoryData } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
 import { storage } from '@/lib/storage'
 import {
@@ -14,6 +14,7 @@ import {
   type StockInfo,
   type VolumeCompareConfig,
 } from '@/components/EChartsCandlestick'
+import { ChipFactorSummary } from '@/components/chip/ChipFactorSummary'
 
 const SUB_INFO_H = 16
 const SUB_GAP = 4
@@ -58,6 +59,8 @@ interface Props {
   refetchIntervalMs?: number
   /** 筹码分布数据；传入时在 K 线右侧叠加筹码面板 */
   chipData?: ChipData | null
+  /** 每日筹码分布序列（悬浮 K 线看历史筹码峰 + 蓝色当日筹码） */
+  chipHistory?: ChipHistoryData | null
 }
 
 function isValidRow(r: any): boolean {
@@ -142,6 +145,7 @@ export function StockDailyKChart({
   extColumns,
   refetchIntervalMs,
   chipData,
+  chipHistory,
 }: Props) {
   const [activeIndicators, setActiveIndicators] = useState<string[]>(['vol'])
   const [showMarkers, setShowMarkers] = useState(true)
@@ -274,6 +278,7 @@ export function StockDailyKChart({
       {!kline.isLoading && !kline.isError && (kline.data?.rows?.length ?? 0) > 0 && rows.length === 0 && (
         <div className="text-sm text-danger py-2">数据格式异常，请刷新页面</div>
       )}
+      {chipData && <ChipFactorSummary data={chipData} />}
       {rows.length > 0 && (
         <EChartsCandlestick
           data={rows}
@@ -293,6 +298,7 @@ export function StockDailyKChart({
           activeIndicators={activeIndicators}
           volumeCompare={volumeCompare}
           chipData={chipData}
+          chipHistory={chipHistory}
         />
       )}
     </div>

@@ -1,6 +1,8 @@
 """筹码分布（chip.py）核心算法单元测试。"""
 from __future__ import annotations
 
+from datetime import date, timedelta
+
 import numpy as np
 import pytest
 
@@ -11,6 +13,7 @@ from app.indicators.chip import (
     _triangle_new_chip,
     advance_chip_distribution,
     compute_chip_distribution,
+    compute_chip_history,
     extract_factors,
 )
 
@@ -274,3 +277,53 @@ def test_advance_matches_full_recompute_exactly():
     assert advanced is not None
     np.testing.assert_allclose(full99.price_grid, full100.price_grid)
     np.testing.assert_allclose(advanced, full100.chip_dist, atol=1e-12)
+
+
+def test_main_cost_lands_on_peak_center():
+    # 单一明显峰在价格 12 附近，main_cost 应落在主峰 basin 的加权均价（峰中心）
+    grid = np.array([10.0, 11.0, 12.0, 13.0, 14.0, 15.0])
+    dist = np.array([0.02, 0.08, 0.5, 0.35, 0.04, 0.01])
+
+    factors = extract_factors(grid, dist, current_price=13.0, hist_close=np.array([10.0, 20.0]))
+
+    assert factors.main_cost > 11.5
+    assert factors.main_cost < 12.5
+
+
+def test_compute_chip_history_last_matches_full():
+    n = 60
+    dates = [date(2026, 1, 1) + timedelta(days=i) for i in range(n)]
+    close = np.full(n, 10.0)
+    high = np.full(n, 10.1)
+    low = np.full(n, 9.9)
+    turnover = np.full(n, 5.0)
+    kwargs = {"min_cum_turnover": 1e9, "max_lookback": 1000}
+
+    grid, rows = compute_chip_history(high, low, close, turnover, dates, **kwargs)
+    full = compute_chip_distribution(high, low, close, turnover, **kwargs)
+
+    assert len(rows) == n
+    assert rows[-1]["date"] == dates[-1].isoformat()
+    np.testing.assert_allclose(grid, full.price_grid)
+    np.testing.assert_allclose(rows[-1]["distribution"], full.chip_dist, atol=1e-12)
+
+
+def test_compute_chip_history_empty_prefix_before_window():
+    n = 20
+    dates = [date(2026, 1, 1) + timedelta(days=i) for i in range(n)]
+    close = np.full(n, 10.0)
+    high = np.full(n, 10.1)
+    low = np.full(n, 9.9)
+    turnover = np.full(n, 50.0)  # 每日 50%，累计 3 倍需 6 天
+
+    grid, rows = compute_chip_history(high, low, close, turnover, dates)
+
+    assert len(rows) == n
+    assert grid.size == DEFAULT_BINS
+    # 窗口起点之前的日期分布全零
+    assert all(v == 0.0 for v in rows[0]["distribution"])
+    assert all(v == 0.0 for v in rows[0]["daily_new"])
+    # 最后一天总分布归一化 ≈ 1
+    assert sum(rows[-1]["distribution"]) == pytest.approx(1.0, abs=1e-9)
+    # 最后一天当日新增筹码总量 ≈ t_decay = 0.5
+    assert sum(rows[-1]["daily_new"]) == pytest.approx(0.5, abs=1e-6)

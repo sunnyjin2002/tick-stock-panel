@@ -46,6 +46,7 @@ class ChipFactors:
     single_peak_width: float   # 主峰价格跨度 / 现价（无量纲，简化版）
     is_low_position: bool      # 现价是否处于近一年低位
     avg_cost: float            # 平均成本（前复权价）
+    main_cost: float           # 主力成本（筹码最密集主峰的加权均价，前复权价）
 
 
 def compute_chip_distribution(
@@ -92,6 +93,86 @@ def compute_chip_distribution(
     return ChipDistribution(price_grid=price_grid, chip_dist=chip)
 
 
+def compute_chip_history(
+    high: np.ndarray,
+    low: np.ndarray,
+    close: np.ndarray,
+    turnover_rate: np.ndarray,
+    dates: list,
+    *,
+    decay: float = DEFAULT_DECAY,
+    bins: int = DEFAULT_BINS,
+    padding: float = DEFAULT_PADDING,
+    min_cum_turnover: float = DEFAULT_MIN_CUM_TURNOVER,
+    max_lookback: int = DEFAULT_MAX_LOOKBACK,
+    smooth_width: int = DEFAULT_SMOOTH_WIDTH,
+) -> tuple[np.ndarray, list[dict]]:
+    """返回 (price_grid, 每日筹码分布序列)，用于「悬浮 K 线看历史筹码峰」。
+
+    - high / low / close：前复权价（按日期升序）；
+    - turnover_rate：百分数换手率；
+    - dates：与上述数组对齐的日期序列（date 或字符串）。
+
+    序列每项为 {"date": ISO 日期字符串, "distribution": 归一化总筹码分布列表,
+    "daily_new": 当日新增筹码分布列表}。回溯窗口起点之前的日期，两个分布均为全零
+    （筹码尚未开始累积）。所有天共享同一个 price_grid。
+    """
+    high = np.asarray(high, dtype=np.float64)
+    low = np.asarray(low, dtype=np.float64)
+    close = np.asarray(close, dtype=np.float64)
+    turnover_rate = np.nan_to_num(np.asarray(turnover_rate, dtype=np.float64), nan=0.0)
+
+    if not (high.size == low.size == close.size == turnover_rate.size):
+        raise ValueError("high/low/close/turnover_rate 长度必须一致")
+    if high.size == 0:
+        raise ValueError("输入数据为空")
+    if bins < 2:
+        raise ValueError("bins 必须 ≥ 2")
+
+    start = _select_window_start(turnover_rate, min_cum_turnover, max_lookback)
+    price_grid = _build_price_grid(low[start:], high[start:], bins, padding)
+
+    fraction = turnover_rate / 100.0
+    chip = np.zeros(bins, dtype=np.float64)
+    rows: list[dict] = []
+    for i in range(high.size):
+        if i < start:
+            # 回溯窗口起点之前：无筹码累积
+            zero = np.zeros(bins, dtype=np.float64)
+            rows.append({
+                "date": _date_to_str(dates[i]),
+                "distribution": zero.tolist(),
+                "daily_new": zero.tolist(),
+                "avg_cost": float(close[i]),
+                "main_cost": float(close[i]),
+            })
+            continue
+        t_decay = min(max(float(fraction[i]) * decay, 0.0), 1.0)
+        if t_decay <= 0.0:
+            daily_new = np.zeros(bins, dtype=np.float64)
+        else:
+            daily_new = _triangle_new_chip(price_grid, high[i], low[i], close[i], t_decay)
+            chip = chip * (1.0 - t_decay) + daily_new
+            total = float(chip.sum())
+            if total > 0.0:
+                chip = chip / total
+        chip_total = float(chip.sum())
+        _avg_cost = float(np.average(price_grid, weights=chip)) if chip_total > 0.0 else float(close[i])
+        _, _, _main_cost = _single_peak_measures(price_grid, chip, close[i], smooth_width)
+        rows.append({
+            "date": _date_to_str(dates[i]),
+            "distribution": chip.tolist(),
+            "daily_new": daily_new.tolist(),
+            "avg_cost": _avg_cost,
+            "main_cost": _main_cost,
+        })
+    return price_grid, rows
+
+
+def _date_to_str(value) -> str:
+    return value.isoformat() if hasattr(value, "isoformat") else str(value)
+
+
 def extract_factors(
     price_grid: np.ndarray,
     chip_dist: np.ndarray,
@@ -114,7 +195,7 @@ def extract_factors(
 
     total = float(dist.sum())
     if total <= 0.0:
-        return ChipFactors(0.0, 0.0, 0.0, 0.0, 0.0, False, float(current_price))
+        return ChipFactors(0.0, 0.0, 0.0, 0.0, 0.0, False, float(current_price), float(current_price))
 
     profit_ratio = float(dist[grid <= current_price].sum() / total)
 
@@ -128,7 +209,7 @@ def extract_factors(
         float((current_price - avg_cost) / avg_cost) if avg_cost > 0.0 else 0.0
     )
 
-    single_peak_ratio, single_peak_width = _single_peak_measures(
+    single_peak_ratio, single_peak_width, main_cost = _single_peak_measures(
         grid, dist, current_price, smooth_width,
     )
 
@@ -145,6 +226,7 @@ def extract_factors(
         single_peak_width=single_peak_width,
         is_low_position=is_low_position,
         avg_cost=avg_cost,
+        main_cost=main_cost,
     )
 
 
@@ -297,13 +379,17 @@ def _single_peak_measures(
     chip_dist: np.ndarray,
     current_price: float,
     smooth_width: int,
-) -> tuple[float, float]:
-    """简化单峰度量：平滑后取全局最大峰，向两侧走到局部极小得到 basin。"""
+) -> tuple[float, float, float]:
+    """简化单峰度量：平滑后取全局最大峰，向两侧走到局部极小得到 basin。
+
+    返回 (single_peak_ratio, single_peak_width, main_cost)，其中 main_cost
+    为主峰 basin 内筹码的加权均价（主力成本/顶格线）。
+    """
     smoothed = _smooth(chip_dist, smooth_width)
     n = smoothed.size
     total = float(chip_dist.sum())
     if n == 0 or total <= 0.0:
-        return 0.0, 0.0
+        return 0.0, 0.0, float(current_price)
 
     p = int(np.argmax(smoothed))
     left = p
@@ -313,8 +399,14 @@ def _single_peak_measures(
     while right < n - 1 and smoothed[right + 1] < smoothed[right]:
         right += 1
 
-    basin_mass = float(chip_dist[left : right + 1].sum())
+    basin_dist = chip_dist[left : right + 1]
+    basin_grid = price_grid[left : right + 1]
+    basin_mass = float(basin_dist.sum())
     peak_ratio = basin_mass / total
     width_price = float(price_grid[right] - price_grid[left])
     peak_width = width_price / current_price if current_price > 0.0 else 0.0
-    return peak_ratio, peak_width
+    main_cost = (
+        float(np.average(basin_grid, weights=basin_dist))
+        if basin_mass > 0.0 else float(current_price)
+    )
+    return peak_ratio, peak_width, main_cost

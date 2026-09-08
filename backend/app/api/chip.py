@@ -34,6 +34,20 @@ def list_factors(
     return {"count": len(items), "items": items}
 
 
+@router.get("/{symbol}/history")
+def get_history(request: Request, symbol: str) -> dict:
+    """单只股票的每日筹码分布序列（悬浮 K 线看历史筹码峰）。
+
+    返回 price_grid（所有天共用）+ days（每天 distribution 总筹码 + daily_new 当日新增）。
+    """
+    data_dir = request.app.state.repo.store.data_dir
+    result = chip_pipeline.get_chip_history(symbol, data_dir)
+    if result is None:
+        raise HTTPException(status_code=404, detail=f"chip history not found: {symbol}")
+    grid, rows = result
+    return {"symbol": symbol, "price_grid": grid.tolist(), "days": rows}
+
+
 @router.get("/{symbol}")
 def get_chip(request: Request, symbol: str) -> dict:
     """单只股票的筹码分布与因子。symbol 不存在时返回 404。"""

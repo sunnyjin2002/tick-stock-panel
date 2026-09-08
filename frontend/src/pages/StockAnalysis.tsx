@@ -196,6 +196,11 @@ function StockAnalysisBoard({ symbol }: { symbol: string }) {
     queryFn: () => api.chip(symbol),
     enabled: !!symbol && showChip,
   })
+  const chipHistory = useQuery({
+    queryKey: QK.chipHistory(symbol),
+    queryFn: () => api.chipHistory(symbol),
+    enabled: !!symbol && showChip,
+  })
 
   if (kline.isLoading) {
     return <div className="flex items-center justify-center py-20"><Loader2 className="h-5 w-5 animate-spin text-muted" /></div>
@@ -283,6 +288,7 @@ function StockAnalysisBoard({ symbol }: { symbol: string }) {
           seriesDates={levelsQ.data?.dates}
           defaultLevelTypes={['sr', 'pivot', 'keltner_s']}
           chipData={showChip ? (chipData.data ?? null) : null}
+          chipHistory={showChip ? (chipHistory.data ?? null) : null}
           showMA={showMA}
           toolbarExtra={toolbarExtra}
           height={480}

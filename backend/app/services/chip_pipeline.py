@@ -21,7 +21,11 @@ import numpy as np
 import polars as pl
 
 from app.config import settings
-from app.enriched_generation import EnrichedPublication, enriched_publication_incomplete
+from app.enriched_generation import (
+    EnrichedPublication,
+    enriched_publication_incomplete,
+    get_enriched_generation,
+)
 from app.indicators.chip import (
     DEFAULT_BINS,
     DEFAULT_DECAY,
@@ -32,6 +36,7 @@ from app.indicators.chip import (
     DEFAULT_SMOOTH_WIDTH,
     advance_chip_distribution,
     compute_chip_distribution,
+    compute_chip_history,
     extract_factors,
 )
 from app.parquet import scan_enriched_parquet
@@ -57,6 +62,7 @@ _CHIP_SCHEMA: dict[str, pl.DataType] = {
     "single_peak_width": pl.Float64,
     "is_low_position": pl.Boolean,
     "avg_cost": pl.Float64,
+    "main_cost": pl.Float64,
     "current_price": pl.Float64,
 }
 
@@ -71,6 +77,7 @@ CHIP_FACTOR_COLS = [
     "single_peak_width",
     "is_low_position",
     "avg_cost",
+    "main_cost",
     "current_price",
 ]
 
@@ -110,6 +117,7 @@ def build_chip_table(
     single_peak_width: list[float] = []
     is_low_position: list[bool] = []
     avg_cost: list[float] = []
+    main_costs: list[float] = []
     current_prices: list[float] = []
 
     for _key, group in df.group_by("symbol", maintain_order=True):
@@ -141,6 +149,7 @@ def build_chip_table(
         single_peak_width.append(factors.single_peak_width)
         is_low_position.append(factors.is_low_position)
         avg_cost.append(factors.avg_cost)
+        main_costs.append(factors.main_cost)
         current_prices.append(float(close[-1]))
 
     return pl.DataFrame({
@@ -155,6 +164,7 @@ def build_chip_table(
         "single_peak_width": pl.Series(single_peak_width, dtype=pl.Float64),
         "is_low_position": pl.Series(is_low_position, dtype=pl.Boolean),
         "avg_cost": pl.Series(avg_cost, dtype=pl.Float64),
+        "main_cost": pl.Series(main_costs, dtype=pl.Float64),
         "current_price": pl.Series(current_prices, dtype=pl.Float64),
     })
 
@@ -236,6 +246,7 @@ def advance_chip_table(
         new_row["single_peak_width"] = factors.single_peak_width
         new_row["is_low_position"] = factors.is_low_position
         new_row["avg_cost"] = factors.avg_cost
+        new_row["main_cost"] = factors.main_cost
         new_row["current_price"] = float(full_close[-1])
         rows.append(new_row)
 
@@ -345,7 +356,9 @@ def compute_chip_table_incremental(
                                        low_window=low_window, smooth_width=smooth_width)
 
     existing = _read_chip_table(d)
-    if existing.is_empty():
+    if existing.is_empty() or "main_cost" not in existing.columns:
+        if not existing.is_empty():
+            logger.warning("chip: 检测到旧版筹码表缺 main_cost 列, 全量重建")
         return compute_chip_table_full(d, decay=decay, bins=bins, padding=padding,
                                        min_cum_turnover=min_cum_turnover,
                                        max_lookback=max_lookback,
@@ -412,3 +425,68 @@ def get_chip_symbol(symbol: str, data_dir: Path | None = None) -> dict | None:
     if d is not None:
         data["date"] = d.isoformat() if hasattr(d, "isoformat") else str(d)
     return data
+
+
+# --------------------------------------------------------------------------- #
+# 历史筹码峰（悬浮 K 线查看，按需重算 + 内存 LRU 缓存）
+# --------------------------------------------------------------------------- #
+
+_HISTORY_CACHE_MAX = 20
+_history_cache: dict[str, tuple[str, np.ndarray, list[dict]]] = {}
+
+
+def get_chip_history(
+    symbol: str,
+    data_dir: Path | None = None,
+) -> tuple[np.ndarray, list[dict]] | None:
+    """按需重算单只股票的每日筹码分布序列（内存 LRU 缓存）。
+
+    返回 (price_grid, rows)；rows 每项含 date / distribution / daily_new。
+    无该股票 enriched 数据时返回 None。缓存随 enriched generation 变化自动失效。
+    """
+    d = Path(data_dir or settings.data_dir)
+    try:
+        gen = get_enriched_generation(d, "stock")
+    except Exception:
+        gen = ""
+    cached = _history_cache.get(symbol)
+    if cached is not None and cached[0] == gen:
+        return cached[1], cached[2]
+
+    enriched = _read_enriched_symbol(d, symbol)
+    if enriched.is_empty():
+        return None
+
+    grid, rows = compute_chip_history(
+        enriched["high"].to_numpy(),
+        enriched["low"].to_numpy(),
+        enriched["close"].to_numpy(),
+        enriched["turnover_rate"].to_numpy(),
+        enriched["date"].to_list(),
+    )
+
+    if symbol not in _history_cache and len(_history_cache) >= _HISTORY_CACHE_MAX:
+        _history_cache.pop(next(iter(_history_cache)))
+    _history_cache[symbol] = (gen, grid, rows)
+    return grid, rows
+
+
+def _read_enriched_symbol(data_dir: Path, symbol: str) -> pl.DataFrame:
+    enriched_base = data_dir / "kline_daily_enriched"
+    if not enriched_base.exists() or not any(enriched_base.rglob("*.parquet")):
+        return pl.DataFrame({
+            "symbol": pl.Series([], dtype=pl.Utf8),
+            "date": pl.Series([], dtype=pl.Date),
+            "high": pl.Series([], dtype=pl.Float64),
+            "low": pl.Series([], dtype=pl.Float64),
+            "close": pl.Series([], dtype=pl.Float64),
+            "turnover_rate": pl.Series([], dtype=pl.Float64),
+        })
+    glob = (enriched_base / "**" / "*.parquet").as_posix()
+    return (
+        scan_enriched_parquet(glob)
+        .filter(pl.col("symbol") == symbol)
+        .select(_ENRICHED_COLS)
+        .sort("date")
+        .collect(engine="streaming")
+    )

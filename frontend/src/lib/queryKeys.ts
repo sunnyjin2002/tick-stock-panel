@@ -111,6 +111,7 @@ export const QK = {
   // 筹码分布 (CYQ)
   chip:                 (symbol: string) => ['chip', symbol] as const,
   chipFactors:          ['chip-factors'] as const,
+  chipHistory:          (symbol: string) => ['chip-history', symbol] as const,
 
   // 市场环境(Regime) — 日级离线计算, 不进 SSE 刷新
   regimeHistory:        (limit?: number) => ['regime-history', limit ?? 0] as const,

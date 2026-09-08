@@ -125,6 +125,11 @@ export function StockPreviewDialog({ symbol, name, onClose, triggerInfo }: Props
     queryFn: () => api.chip(symbol!),
     enabled: !!symbol && showChip,
   })
+  const chipHistory = useQuery({
+    queryKey: QK.chipHistory(symbol ?? ''),
+    queryFn: () => api.chipHistory(symbol!),
+    enabled: !!symbol && showChip,
+  })
 
   const inWatchlist = (watchlist.data?.symbols ?? []).some((s: any) => s.symbol === symbol)
 
@@ -514,6 +519,7 @@ export function StockPreviewDialog({ symbol, name, onClose, triggerInfo }: Props
                   onPriceDoubleClick={openPriceAlert}
                   refetchIntervalMs={intradayRefetchMs}
                   chipData={showChip ? (chipData.data ?? null) : null}
+                  chipHistory={showChip ? (chipHistory.data ?? null) : null}
                 />
               ) : (
                 <>
